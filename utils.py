@@ -1,87 +1,37 @@
-import json
-import base64
-import urllib.parse
+# utils.py
+import random
+import time
+import re
 import logging
-import yaml
-from typing import List, Optional
-from pydantic import ValidationError
-from .models import VmessConfig, VlessConfig, Hysteria2Config
+from telethon import events
 
-logger = logging.getLogger(__name__)
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format='%(asctime)s - %(message)s'
+)
 
-def load_config(file_path: str = "config.yaml") -> dict:
+def load_list(file_path):
+    """Load list from file, skipping comments and empty lines."""
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f)
-        logger.info(f"فایل تنظیمات {file_path} با موفقیت لود شد")
-        return config
-    except FileNotFoundError as e:
-        logger.error(f"فایل تنظیمات {file_path} پیدا نشد: {e}")
-        raise
-    except yaml.YAMLError as e:
-        logger.error(f"خطا در پارس فایل تنظیمات {file_path}: {e}")
-        raise
-    except Exception as e:
-        logger.error(f"خطای ناشناخته در لود کردن تنظیمات: {e}")
-        raise
-
-def load_channels(file_path: str = "channels.yaml") -> List[str]:
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-            channels = data.get("channels", [])
-        logger.info(f"{len(channels)} کانال از {file_path} لود شد")
-        return channels
+        with open(file_path, 'r', encoding='utf-8') as file:
+            items = [line.strip() for line in file if line.strip() and not line.startswith('#')]
+        return items
     except FileNotFoundError:
-        logger.warning(f"فایل کانال‌ها {file_path} پیدا نشد. لیست خالی برگردانده می‌شود")
+        logging.error(f"File {file_path} not found!")
         return []
     except Exception as e:
-        logger.error(f"خطا در لود کردن کانال‌ها: {e}")
+        logging.error(f"Error reading {file_path}: {e}")
         return []
 
-def is_valid_v2ray_link(link: str) -> bool:
-    try:
-        logger.debug(f"در حال بررسی لینک: {link[:50]}...")
+def extract_download_links(text):
+    """Extract potential download links using regex."""
+    # Simple regex for URLs
+    urls = re.findall(r'https?://[^\s]+', text)
+    # Filter likely download links
+    download_urls = [url for url in urls if any(ext in url.lower() for ext in ['.mkv', '.mp4', '.zip', 'download', 'dl'])]
+    return download_urls if download_urls else None
 
-        if link.startswith("vmess://"):
-            encoded = link[8:]
-            decoded = base64.b64decode(encoded + '=' * (-len(encoded) % 4)).decode('utf-8')
-            config_data = json.loads(decoded)
-            VmessConfig(**config_data)
-            return True
-
-        elif link.startswith("vless://"):
-            VlessConfig.from_uri(link)
-            return True
-
-        elif link.startswith("hysteria2://"):
-            Hysteria2Config.from_uri(link)
-            return True
-
-        logger.warning(f"پروتکل ناشناخته در لینک: {link[:50]}...")
-        return False
-
-    except (base64.binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as e:
-        logger.error(f"خطای فرمت در لینک {link[:50]}...: {e}")
-        return False
-    except ValidationError as e:
-        logger.error(f"خطای اعتبارسنجی برای لینک {link[:50]}...: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"خطای ناشناخته در بررسی لینک {link[:50]}...: {e}")
-        return False
-
-def parse_v2ray_protocol(link: str) -> Optional[str]:
-    try:
-        logger.debug(f"در حال شناسایی پروتکل لینک: {link[:50]}...")
-        if link.startswith("vmess://"):
-            return "vmess"
-        elif link.startswith("vless://"):
-            return "vless"
-        elif link.startswith("hysteria2://"):
-            return "hysteria2"
-        logger.warning(f"پروتکل ناشناخته در لینک: {link[:50]}...")
-        return None
-    except Exception as e:
-        logger.error(f"خطای ناشناخته در شناسایی پروتکل لینک {link[:50]}...: {e}")
-        return None
+def random_delay(min_sec=1, max_sec=5):
+    """Sleep for a random time to avoid rate limiting."""
+    time.sleep(random.uniform(min_sec, max_sec))
