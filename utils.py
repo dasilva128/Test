@@ -4,11 +4,15 @@ import time
 import re
 import logging
 from telethon import events
+from config import LOG_FILE
 
 logging.basicConfig(
-    filename=LOG_FILE,
     level=logging.INFO,
-    format='%(asctime)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+        logging.StreamHandler()
+    ]
 )
 
 def load_list(file_path):
@@ -26,10 +30,8 @@ def load_list(file_path):
 
 def extract_download_links(text):
     """Extract potential download links using regex."""
-    # Simple regex for URLs
-    urls = re.findall(r'https?://[^\s]+', text)
-    # Filter likely download links
-    download_urls = [url for url in urls if any(ext in url.lower() for ext in ['.mkv', '.mp4', '.zip', 'download', 'dl'])]
+    urls = re.findall(r'https?://[^\s<>"\']+', text)
+    download_urls = [url for url in urls if any(ext in url.lower() for ext in ['.mkv', '.mp4', '.zip', 'download', 'dl', 'btndlapp'])]
     return download_urls if download_urls else None
 
 def random_delay(min_sec=1, max_sec=5):
