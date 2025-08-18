@@ -4,48 +4,99 @@ import asyncio
 import logging
 import re
 import random
+import os
 from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from config import PROXIES
+from config import HTML_OUTPUT_DIR
 from utils import random_delay, extract_download_links
 
+# List of common search paths
+COMMON_SEARCH_PATHS = ['/?s=', '/search/', '/q=', '/search?q=']
+
+# Common post selectors
+POST_SELECTORS = [
+    'article', 'div.post', 'div.entry', 'div.item', 'div.content',
+    'div.post-title', 'div.entry-title', 'div.item-title',
+    'img.wp-post-image', 'div.attachment-post_cover',  # From zarfilm.com
+    'li.cat-item', 'div.cat-item'  # From cooldl.net
+]
+
+async def load_html_file(url):
+    """Load HTML file from html_output directory."""
+    filename = url.replace("https://", "").replace("http://", "").replace("/", "_").replace(".", "_") + ".txt"
+    filepath = os.path.join(HTML_OUTPUT_DIR, filename)
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return f.read()
+    except FileNotFoundError:
+        logging.warning(f"HTML file for {url} not found in {HTML_OUTPUT_DIR}")
+        return None
+    except Exception as e:
+        logging.error(f"Error reading HTML file for {url}: {e}")
+        return None
+
+async def is_dynamic_site(html_content):
+    """Check if the site is dynamic (JavaScript-dependent)."""
+    if not html_content:
+        return False
+    soup = BeautifulSoup(html_content, 'html.parser')
+    # Check for SPA or redirect pages
+    if soup.find('div', id='app') or \
+       any(script.get('src', '').endswith('.js') for script in soup.find_all('script')) or \
+       (soup.find('title') and 'redirecting' in soup.find('title').get_text().lower()):
+        return True
+    return False
+
+async def guess_search_path(html_content):
+    """Guess search path from HTML metadata or use common paths."""
+    if not html_content:
+        return COMMON_SEARCH_PATHS[0]  # Default to first common path
+    soup = BeautifulSoup(html_content, 'html.parser')
+    meta_desc = soup.find('meta', attrs={'name': 'description'})
+    title = soup.find('title')
+    
+    # Check for keywords in meta or title
+    keywords = ['جستجو', 'search', 'فیلم', 'سریال']
+    if (meta_desc and any(kw in meta_desc.get('content', '').lower() for kw in keywords)) or \
+       (title and any(kw in title.get_text().lower() for kw in keywords)):
+        return '/search/'  # Prefer /search/ if keywords found
+    # Check for WordPress indicators (from zarfilm.com, cooldl.net)
+    if '/wp-content/' in html_content or '/wp-' in html_content or 'cat-item' in html_content:
+        return '/?s='  # Common for WordPress sites
+    return random.choice(COMMON_SEARCH_PATHS)  # Otherwise, choose randomly
+
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-async def fetch_page(session, url, proxy=None):
+async def fetch_page(session, url):
     """Fetch page with retry."""
     headers = {
         'User-Agent': random.choice([
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            # Add more user-agents
-        ])
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0',
+        ]),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Connection': 'keep-alive'
     }
-    async with session.get(url, proxy=proxy, headers=headers, timeout=10) as response:
+    async with session.get(url, headers=headers, timeout=10) as response:
         if response.status == 200:
-            return await response.text()
+            try:
+                return await response.text(encoding='utf-8')
+            except UnicodeDecodeError:
+                logging.warning(f"UTF-8 failed for {url}, trying latin1")
+                return await response.text(encoding='latin1')
         else:
             raise Exception(f"Status code {response.status}")
-
-async def get_proxy():
-    """Get a random working proxy."""
-    if not PROXIES:
-        return None
-    proxy = random.choice(PROXIES)
-    # Test proxy (simplified)
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get('https://www.google.com', proxy=proxy, timeout=5):
-                return proxy
-    except:
-        return await get_proxy()  # Recurse to try another
 
 async def search_telegram_channel(url, movie_name):
     """Search for movie posts in a Telegram channel."""
     pattern = rf'\b{re.escape(movie_name.lower())}\b'
-    proxy = await get_proxy()
     
     async with aiohttp.ClientSession() as session:
         try:
-            html = await fetch_page(session, url, proxy)
+            html = await fetch_page(session, url)
             soup = BeautifulSoup(html, 'html.parser')
             messages = soup.find_all('div', class_='tgme_widget_message')
             posts = []
@@ -68,65 +119,88 @@ async def search_telegram_channel(url, movie_name):
             logging.error(f"Error searching {url}: {e}")
             return []
 
-# Site-specific selectors (example; customize per site)
-SITE_SELECTORS = {
-    'zarfilm.com': {
-        'search_path': '/?s=',
-        'post_class': 'post-title',
-        'link_attr': 'href',
-        'text_tag': 'p',
-        'download_class': 'download-link'
-    },
-    'film2mediax.ir': {
-        'search_path': '/search/',
-        'post_class': 'entry-title',
-        'link_attr': 'href',
-        'text_tag': 'div.entry-summary',
-        'download_class': 'dl-link'
-    },
-    # Add more sites with their selectors...
-    # For example:
-    'hexdl.com': {
-        'search_path': '/?s=',
-        'post_class': 'item-title',
-        'link_attr': 'href',
-        'text_tag': 'div.excerpt',
-        'download_class': 'download-button'
-    },
-    # ... and so on for other sites
-}
-
 async def search_website(base_url, movie_name):
     """Search for movie on a website."""
-    if base_url not in SITE_SELECTORS:
-        logging.warning(f"No selectors for {base_url}")
-        return []
+    html_content = await load_html_file(base_url)
+    search_path = await guess_search_path(html_content)
+    search_url = base_url.rstrip('/') + search_path + re.sub(r'\s+', '+', movie_name)
     
-    selectors = SITE_SELECTORS[base_url]
-    search_url = base_url.rstrip('/') + selectors['search_path'] + re.sub(r'\s+', '+', movie_name)
-    proxy = await get_proxy()
+    # Check if the site is dynamic
+    is_dynamic = await is_dynamic_site(html_content)
     
-    async with aiohttp.ClientSession() as session:
-        try:
-            html = await fetch_page(session, search_url, proxy)
-            soup = BeautifulSoup(html, 'html.parser')
-            posts = soup.find_all(class_=selectors['post_class'])
-            results = []
-            
-            for post in posts:
-                title = post.get_text(strip=True).lower()
-                if movie_name.lower() in title:
-                    link = post.find('a')[selectors['link_attr']] if post.find('a') else None
-                    if link:
-                        # Optionally fetch post page for download links
-                        post_html = await fetch_page(session, link, proxy)
-                        post_soup = BeautifulSoup(post_html, 'html.parser')
-                        text = post_soup.find(selectors['text_tag']).get_text(strip=True) if post_soup.find(selectors['text_tag']) else ''
-                        download_urls = [a['href'] for a in post_soup.find_all('a', class_=selectors['download_class'])]
-                        results.append((link, text[:200], download_urls))
-            
-            logging.info(f"Search in {base_url} for {movie_name}: {len(results)} results found")
-            return results
-        except Exception as e:
-            logging.error(f"Error searching {base_url}: {e}")
-            return []
+    if is_dynamic:
+        logging.info(f"Dynamic site detected for {base_url}, using Playwright")
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+            try:
+                await page.goto(search_url, timeout=30000, wait_until='networkidle')
+                await page.wait_for_load_state('networkidle', timeout=30000)
+                html = await page.content()
+                await browser.close()
+            except Exception as e:
+                logging.error(f"Playwright error for {search_url}: {e}")
+                await browser.close()
+                return []
+    else:
+        async with aiohttp.ClientSession() as session:
+            try:
+                html = await fetch_page(session, search_url)
+            except Exception as e:
+                logging.error(f"Error fetching {search_url}: {e}")
+                return []
+
+    # Parse the HTML
+    soup = BeautifulSoup(html, 'html.parser')
+    results = []
+    
+    for selector in POST_SELECTORS:
+        posts = soup.select(selector)
+        for post in posts:
+            # Check title or alt attributes for movie name
+            title = post.get_text(strip=True).lower()
+            img_alt = post.find('img', alt=True)
+            alt_text = img_alt['alt'].lower() if img_alt else ''
+            link_text = post.find('a', href=True)
+            link_text_content = link_text.get_text(strip=True).lower() if link_text else ''
+            if movie_name.lower() in title or movie_name.lower() in alt_text or movie_name.lower() in link_text_content:
+                link = post.find('a', href=True)
+                if link and 'href' in link.attrs:
+                    post_link = link['href']
+                    # Ensure post_link is absolute
+                    if not post_link.startswith(('http://', 'https://')):
+                        post_link = base_url.rstrip('/') + '/' + post_link.lstrip('/')
+                    # Fetch post page for details
+                    if is_dynamic:
+                        async with async_playwright() as p:
+                            browser = await p.chromium.launch(headless=True)
+                            page = await browser.new_page()
+                            try:
+                                await page.goto(post_link, timeout=30000, wait_until='networkidle')
+                                await page.wait_for_load_state('networkidle', timeout=30000)
+                                post_html = await page.content()
+                                await browser.close()
+                            except Exception as e:
+                                logging.error(f"Playwright error for {post_link}: {e}")
+                                await browser.close()
+                                continue
+                            post_soup = BeautifulSoup(post_html, 'html.parser')
+                    else:
+                        async with aiohttp.ClientSession() as session:
+                            try:
+                                post_html = await fetch_page(session, post_link)
+                                post_soup = BeautifulSoup(post_html, 'html.parser')
+                            except Exception as e:
+                                logging.error(f"Error fetching {post_link}: {e}")
+                                continue
+                    
+                    text = post_soup.get_text(strip=True)[:200]
+                    # Look for download links with specific classes or patterns
+                    download_urls = [a['href'] for a in post_soup.find_all('a', href=True) 
+                                    if any(kw in a['href'].lower() for kw in ['.mkv', '.mp4', 'download', 'dl', 'btndlapp'])]
+                    results.append((post_link, text, download_urls))
+        if results:  # Stop if we found results with this selector
+            break
+    
+    logging.info(f"Search in {base_url} for {movie_name}: {len(results)} results found")
+    return results
