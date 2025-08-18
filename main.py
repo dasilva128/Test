@@ -1,10 +1,22 @@
+# main.py
 import asyncio
 from telethon import TelegramClient, events
+import logging
 
-from config import API_ID, API_HASH, BOT_TOKEN, DESTINATION_CHAT, CHANNELS_FILE, SITES_FILE
+from config import API_ID, API_HASH, BOT_TOKEN, DESTINATION_CHAT, CHANNELS_FILE, SITES_FILE, LOG_FILE
 from db import init_db, save_result, get_cached_results, clean_expired_results
 from utils import load_list, random_delay
 from scrapers import search_telegram_channel, search_website
+
+# Configure logging to file and console
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
 
 client = TelegramClient('bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 semaphore = asyncio.Semaphore(5)  # Limit to 5 concurrent requests
@@ -23,7 +35,7 @@ async def search_movie(event):
 
     movie_name = event.message.text.strip()
     if not movie_name:
-        await event.reply("لطفاً نام فیلم را وارد کنید!")
+        await event.reply("لطفاً نام فیلم را وارد کنید! مثلاً: 'گودزیلا' یا 'The Godfather'")
         return
 
     await event.reply(f"در حال جستجو برای '{movie_name}'...")
@@ -42,7 +54,7 @@ async def search_movie(event):
     telegram_urls = load_list(CHANNELS_FILE)
     sites = load_list(SITES_FILE)
     if not telegram_urls and not sites:
-        await event.reply("هیچ منبع‌ای (کانال یا سایت) تعریف نشده است!")
+        await event.reply("هیچ منبع‌ای (کانال یا سایت) تعریف نشده است! لطفاً فایل‌های channels.txt یا sites.txt را پر کنید.")
         return
 
     # Search concurrently with semaphore
@@ -69,7 +81,7 @@ async def search_movie(event):
                 await client.send_message(DESTINATION_CHAT, message)
                 save_result(movie_name, source, post_link, post_text)
                 found = True
-            random_delay()
+            await random_delay()
 
     if not found:
         await event.reply(f"هیچ پستی با نام '{movie_name}' پیدا نشد.")
