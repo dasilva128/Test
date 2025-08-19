@@ -1,9 +1,8 @@
-# main.py
 import asyncio
 from telethon import TelegramClient, events
 import logging
 
-from config import API_ID, API_HASH, BOT_TOKEN, DESTINATION_CHAT, CHANNELS_FILE, SITES_FILE, LOG_FILE
+from config import API_ID, API_HASH, BOT_TOKEN, CHANNELS_FILE, SITES_FILE, LOG_FILE
 from db import init_db, save_result, get_cached_results, clean_expired_results
 from utils import load_list, random_delay
 from scrapers import search_telegram_channel, search_website
@@ -78,7 +77,6 @@ async def search_movie(event):
                 if download_urls:
                     message += f"\nلینک‌های دانلود: {', '.join(download_urls)}"
                 await event.reply(message)
-                await client.send_message(DESTINATION_CHAT, message)
                 save_result(movie_name, source, post_link, post_text)
                 found = True
             await random_delay()
