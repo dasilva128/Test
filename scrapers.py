@@ -1,12 +1,9 @@
-# scrapers.py
 import aiohttp
-import asyncio
 import logging
 import re
 import random
 import os
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config import HTML_OUTPUT_DIR
@@ -37,18 +34,6 @@ async def load_html_file(url):
         logging.error(f"Error reading HTML file for {url}: {e}")
         return None
 
-async def is_dynamic_site(html_content):
-    """Check if the site is dynamic (JavaScript-dependent)."""
-    if not html_content:
-        return False
-    soup = BeautifulSoup(html_content, 'html.parser')
-    # Check for SPA or redirect pages
-    if soup.find('div', id='app') or \
-       any(script.get('src', '').endswith('.js') for script in soup.find_all('script')) or \
-       (soup.find('title') and 'redirecting' in soup.find('title').get_text().lower()):
-        return True
-    return False
-
 async def guess_search_path(html_content):
     """Guess search path from HTML metadata or use common paths."""
     if not html_content:
@@ -62,7 +47,7 @@ async def guess_search_path(html_content):
     if (meta_desc and any(kw in meta_desc.get('content', '').lower() for kw in keywords)) or \
        (title and any(kw in title.get_text().lower() for kw in keywords)):
         return '/search/'  # Prefer /search/ if keywords found
-    # Check for WordPress indicators (from zarfilm.com, cooldl.net)
+    # Check for WordPress indicators
     if '/wp-content/' in html_content or '/wp-' in html_content or 'cat-item' in html_content:
         return '/?s='  # Common for WordPress sites
     return random.choice(COMMON_SEARCH_PATHS)  # Otherwise, choose randomly
@@ -125,30 +110,12 @@ async def search_website(base_url, movie_name):
     search_path = await guess_search_path(html_content)
     search_url = base_url.rstrip('/') + search_path + re.sub(r'\s+', '+', movie_name)
     
-    # Check if the site is dynamic
-    is_dynamic = await is_dynamic_site(html_content)
-    
-    if is_dynamic:
-        logging.info(f"Dynamic site detected for {base_url}, using Playwright")
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
-            try:
-                await page.goto(search_url, timeout=30000, wait_until='networkidle')
-                await page.wait_for_load_state('networkidle', timeout=30000)
-                html = await page.content()
-                await browser.close()
-            except Exception as e:
-                logging.error(f"Playwright error for {search_url}: {e}")
-                await browser.close()
-                return []
-    else:
-        async with aiohttp.ClientSession() as session:
-            try:
-                html = await fetch_page(session, search_url)
-            except Exception as e:
-                logging.error(f"Error fetching {search_url}: {e}")
-                return []
+    async with aiohttp.ClientSession() as session:
+        try:
+            html = await fetch_page(session, search_url)
+        except Exception as e:
+            logging.error(f"Error fetching {search_url}: {e}")
+            return []
 
     # Parse the HTML
     soup = BeautifulSoup(html, 'html.parser')
@@ -171,28 +138,13 @@ async def search_website(base_url, movie_name):
                     if not post_link.startswith(('http://', 'https://')):
                         post_link = base_url.rstrip('/') + '/' + post_link.lstrip('/')
                     # Fetch post page for details
-                    if is_dynamic:
-                        async with async_playwright() as p:
-                            browser = await p.chromium.launch(headless=True)
-                            page = await browser.new_page()
-                            try:
-                                await page.goto(post_link, timeout=30000, wait_until='networkidle')
-                                await page.wait_for_load_state('networkidle', timeout=30000)
-                                post_html = await page.content()
-                                await browser.close()
-                            except Exception as e:
-                                logging.error(f"Playwright error for {post_link}: {e}")
-                                await browser.close()
-                                continue
+                    async with aiohttp.ClientSession() as session:
+                        try:
+                            post_html = await fetch_page(session, post_link)
                             post_soup = BeautifulSoup(post_html, 'html.parser')
-                    else:
-                        async with aiohttp.ClientSession() as session:
-                            try:
-                                post_html = await fetch_page(session, post_link)
-                                post_soup = BeautifulSoup(post_html, 'html.parser')
-                            except Exception as e:
-                                logging.error(f"Error fetching {post_link}: {e}")
-                                continue
+                        except Exception as e:
+                            logging.error(f"Error fetching {post_link}: {e}")
+                            continue
                     
                     text = post_soup.get_text(strip=True)[:200]
                     # Look for download links with specific classes or patterns
